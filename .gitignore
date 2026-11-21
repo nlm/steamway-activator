@@ -1,0 +1,10 @@
+# Build output
+/steamway-activator
+/dist/
+
+# Local working notes (design/plan docs and agent workspaces) — not part of the public project
+/docs/superpowers/
+/.superpowers/
+
+# macOS
+.DS_Store
