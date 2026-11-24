@@ -103,7 +103,7 @@ func run() int {
 		Now: now, Log: log,
 	}
 	waker := &watch.Waker{
-		MAC: mac, Instance: inst, Notify: notify, MarkActive: checker.MarkActive,
+		MAC: mac, Instance: inst, Notify: notify, MarkActive: checker.MarkActive, Started: checker.Arm,
 		Guard: 10 * time.Second, PollInterval: 10 * time.Second, PendingTimeout: 3 * time.Minute,
 		Now: now, Log: log, Context: ctx,
 	}

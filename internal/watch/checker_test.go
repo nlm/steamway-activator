@@ -62,6 +62,19 @@ func newEnv(t *testing.T) *env {
 		Now:              func() time.Time { return e.now },
 		Log:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	e.c.Arm() // most tests watch a session this program started
+	e.notes = nil
+	return e
+}
+
+// newIdleEnv is newEnv without Arm: an instance this program didn't start.
+func newIdleEnv(t *testing.T) *env {
+	e := newEnv(t)
+	e.c = &Checker{
+		Instance: e.inst, Sunshine: e.sun, Notify: e.c.Notify,
+		IdleLimit: e.c.IdleLimit, UnreachableLimit: e.c.UnreachableLimit, Interval: e.c.Interval,
+		Now: e.c.Now, Log: e.c.Log,
+	}
 	return e
 }
 
@@ -94,7 +107,7 @@ const mn = time.Minute
 
 func TestCheck_StoppedDoesNothing(t *testing.T) {
 	e := newEnv(t)
-	for i := range 5 {
+	for i := range 3 { // within the start grace
 		r := e.at(time.Duration(i)*mn, "stopped", 0, nil)
 		if r.PoweredOff || r.Reason != "" || r.State != "stopped" {
 			t.Fatalf("result %+v", r)
@@ -135,8 +148,9 @@ func TestCheck_IdleClockStartsAtFirstAnswer(t *testing.T) {
 		t.Fatalf("result %+v", r)
 	}
 	e.wantPowerOffs(1)
-	if len(e.notes) != 1 || !strings.Contains(e.notes[0], "Instance powered off: no app running for 5m0s") {
-		t.Fatalf("notes %q", e.notes)
+	notes := e.otherNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0], "Instance powered off: no app running for 5m0s") {
+		t.Fatalf("notes %q", notes)
 	}
 }
 
@@ -206,8 +220,9 @@ func TestCheck_ScalewayDownDoesNothing(t *testing.T) {
 		t.Fatal("Sunshine called while Scaleway down")
 	}
 	e.wantPowerOffs(0)
-	if len(e.notes) != 0 {
-		t.Fatalf("notes %q", e.notes)
+	notes := e.otherNotes()
+	if len(notes) != 0 {
+		t.Fatalf("notes %q", notes)
 	}
 	r := e.at(181*mn, "running", 0, nil)
 	if !r.PoweredOff || r.Reason != "idle" {
@@ -286,8 +301,9 @@ func TestCheck_PowerOffFailureRetries(t *testing.T) {
 	if r.PoweredOff {
 		t.Fatal("PoweredOff despite failure")
 	}
-	if len(e.notes) != 1 || !strings.Contains(e.notes[0], "Couldn't power off the instance: boom") {
-		t.Fatalf("notes %q", e.notes)
+	notes := e.otherNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0], "Couldn't power off the instance: boom") {
+		t.Fatalf("notes %q", notes)
 	}
 	e.inst.powerOffErr = nil
 	r = e.at(6*mn, "running", 0, nil)
@@ -343,8 +359,9 @@ func TestCheck_PowerOffAuthFailureNotifiesHourly(t *testing.T) {
 		}
 	}
 	e.wantPowerOffs(60) // retried at every check from 5m on
-	if len(e.notes) != 1 || !strings.Contains(e.notes[0], "Scaleway rejected the API key") {
-		t.Fatalf("notes %q", e.notes)
+	notes := e.otherNotes()
+	if len(notes) != 1 || !strings.Contains(notes[0], "Scaleway rejected the API key") {
+		t.Fatalf("notes %q", notes)
 	}
 }
 
@@ -360,6 +377,17 @@ func TestCheck_PowerOffSuccessClearsTimers(t *testing.T) {
 		t.Fatalf("second power off right after the first: %+v", r)
 	}
 	e.wantPowerOffs(1)
+}
+
+// otherNotes is e.notes without the "Instance ready" notices.
+func (e *env) otherNotes() []string {
+	var out []string
+	for _, m := range e.notes {
+		if !strings.Contains(m, "Instance ready: open Moonlight") {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (e *env) readyNotes() int {
@@ -389,21 +417,17 @@ func TestCheck_ReadyNotifiesAfterBoot(t *testing.T) {
 	e.at(3*time.Minute, "running", 0, nil)
 	e.at(4*time.Minute, "running", 1, nil)
 	e.wantReady(1)
-	e.at(5*time.Minute, "stopping", 0, nil)
-	e.at(6*time.Minute, "stopped", 0, nil)
-	e.at(7*time.Minute, "running", 0, nil)
-	e.wantReady(2)
 }
 
-func TestCheck_ReadyNotAtProgramStart(t *testing.T) {
+func TestCheck_ReadyOnceAfterArm(t *testing.T) {
 	e := newEnv(t)
 	e.at(0, "running", 0, nil)
 	e.at(time.Minute, "running", 1, nil)
-	e.wantReady(0)
+	e.wantReady(1)
 }
 
 func TestCheck_ReadyEachNonRunningState(t *testing.T) {
-	for _, st := range []string{"stopped", "stopped in place", "starting", "stopping", "locked"} {
+	for _, st := range []string{"stopped", "starting", "stopping", "locked"} {
 		e := newEnv(t)
 		e.at(0, st, 0, nil)
 		e.at(time.Minute, "running", 0, nil)
@@ -425,4 +449,95 @@ func TestCheck_ReadySleepGapKeepsState(t *testing.T) {
 	e.at(0, "stopped", 0, nil)
 	e.at(time.Hour, "running", 0, nil)
 	e.wantReady(1)
+}
+
+func TestCheck_NotArmedMakesNoCall(t *testing.T) {
+	e := newIdleEnv(t)
+	for i, st := range []string{"running", "stopped in place", "running"} {
+		if r := e.at(time.Duration(i)*time.Hour, st, 0, nil); r != (Result{}) {
+			t.Fatalf("result %+v", r)
+		}
+	}
+	if e.sun.calls != 0 || len(e.notes) != 0 {
+		t.Fatalf("Sunshine calls %d, notes %q", e.sun.calls, e.notes)
+	}
+	e.wantPowerOffs(0)
+}
+
+func TestCheck_MarkActiveStartsWatching(t *testing.T) {
+	e := newIdleEnv(t)
+	e.now = t0
+	e.c.MarkActive() // Wake PC on an instance started from the console
+	if !e.c.Armed() {
+		t.Fatal("not watching after MarkActive")
+	}
+	e.at(mn, "running", 0, nil)
+	e.wantReady(1)
+	if r := e.at(4*mn, "running", 0, nil); r.PoweredOff {
+		t.Fatal("idle clock must start at the wake")
+	}
+	if r := e.at(5*mn, "running", 0, nil); !r.PoweredOff || r.Reason != "idle" {
+		t.Fatalf("result %+v", r)
+	}
+}
+
+func TestCheck_MarkActiveWhileWatchingNoReady(t *testing.T) {
+	e := newEnv(t)
+	e.at(0, "running", 0, nil)
+	e.wantReady(1)
+	e.now = t0.Add(mn)
+	e.c.MarkActive()
+	e.at(2*mn, "running", 0, nil)
+	e.wantReady(1)
+}
+
+func TestCheck_PowerOffDisarms(t *testing.T) {
+	e := newEnv(t)
+	e.at(0, "running", 0, nil)
+	if r := e.at(6*mn, "running", 0, nil); !r.PoweredOff {
+		t.Fatalf("result %+v", r)
+	}
+	if e.c.Armed() {
+		t.Fatal("still armed after power off")
+	}
+	calls := e.sun.calls
+	e.at(time.Hour, "running", 0, nil) // restarted from the console
+	if e.sun.calls != calls {
+		t.Fatal("still watching")
+	}
+	e.wantPowerOffs(1)
+}
+
+func TestCheck_StoppedAfterUpDisarms(t *testing.T) {
+	for _, st := range []string{"stopped", "stopping"} {
+		e := newEnv(t)
+		e.at(0, "running", 0, nil)
+		e.at(mn, st, 0, nil) // stopped from the console
+		if e.c.Armed() {
+			t.Fatalf("%s: still armed", st)
+		}
+	}
+}
+
+func TestCheck_StoppedRightAfterArmKeepsWatching(t *testing.T) {
+	e := newEnv(t)
+	e.at(0, "stopped", 0, nil) // Scaleway lag after poweron
+	e.at(mn, "stopped", 0, nil)
+	if !e.c.Armed() {
+		t.Fatal("disarmed within the start grace")
+	}
+	e.at(2*mn, "running", 0, nil)
+	if r := e.at(8*mn, "running", 0, nil); !r.PoweredOff {
+		t.Fatalf("result %+v, want idle power off", r)
+	}
+}
+
+func TestCheck_NeverUpDisarmsAfterGrace(t *testing.T) {
+	e := newEnv(t)
+	for i := 0; i <= 3; i++ {
+		e.at(time.Duration(i)*mn, "stopped", 0, nil)
+	}
+	if e.c.Armed() {
+		t.Fatal("still armed after the start grace")
+	}
 }

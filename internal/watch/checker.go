@@ -1,4 +1,7 @@
-// Package watch decides when to power the instance off.
+// Package watch decides when to power the instance off. It only watches an
+// instance after a Wake PC: Check does nothing until Arm (the waker powered it
+// on) or MarkActive (Wake PC while it was already running) is called, and
+// stops again once the instance is powered off or seen stopped.
 package watch
 
 import (
@@ -29,6 +32,10 @@ type Notifier func(title, message string)
 
 const noticeEvery = time.Hour
 
+// startGrace is how long after Arm a "stopped"/"stopping" state is taken as
+// Scaleway lag rather than the end of the session, until the instance is seen up.
+const startGrace = 3 * time.Minute
+
 // Checker applies the power-off rules once per Check call.
 type Checker struct {
 	Instance                              Instance
@@ -39,6 +46,9 @@ type Checker struct {
 	Log                                   *slog.Logger
 
 	mu               sync.Mutex // guards the fields below, never held across a network call
+	armed            bool       // watching a session this program started
+	armedAt          time.Time
+	seenUp           bool // running or starting seen since Arm
 	lastCheck        time.Time
 	lastActive       time.Time
 	unreachableSince time.Time
@@ -56,19 +66,63 @@ type Result struct {
 	Reason     string
 }
 
-// MarkActive resets the idle clock. It is safe to call from other goroutines.
+// Arm starts watching the instance: call it after this program powered it on.
+// It resets the timers. It is safe to call from other goroutines.
+func (c *Checker) Arm() {
+	now := c.Now()
+	c.mu.Lock()
+	c.armed, c.armedAt, c.seenUp = true, now, false
+	c.lastActive, c.unreachableSince = time.Time{}, time.Time{}
+	c.sawDown = true
+	c.mu.Unlock()
+	c.Log.Info("watching instance")
+}
+
+// Armed reports whether the checker is watching the instance.
+func (c *Checker) Armed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.armed
+}
+
+// disarm stops watching. The caller holds c.mu.
+func (c *Checker) disarm(why string) {
+	c.armed = false
+	c.lastActive, c.unreachableSince = time.Time{}, time.Time{}
+	c.Log.Info("stopped watching instance", "why", why)
+}
+
+// MarkActive records a Wake PC on a running instance: it resets the idle
+// clock and, if the checker isn't watching yet, starts watching (the instance
+// was started elsewhere, e.g. from the console). It is safe to call from other
+// goroutines.
 func (c *Checker) MarkActive() {
 	now := c.Now()
 	c.mu.Lock()
+	adopt := !c.armed
+	if adopt {
+		c.armed, c.armedAt, c.seenUp = true, now, true
+		c.unreachableSince = time.Time{}
+		c.sawDown = true // confirm with a ready notice at the next check
+	}
 	c.lastActive = now
 	c.mu.Unlock()
+	if adopt {
+		c.Log.Info("watching instance", "via", "wake on running instance")
+	}
 }
 
-// Check runs one check. It must only be called from the check loop.
+// Check runs one check. It must only be called from the check loop. It makes
+// no network call unless the checker is armed.
 func (c *Checker) Check(ctx context.Context) Result {
 	now := c.Now()
 
 	c.mu.Lock()
+	if !c.armed {
+		c.lastCheck = now
+		c.mu.Unlock()
+		return Result{}
+	}
 	if !c.lastCheck.IsZero() && now.Sub(c.lastCheck) > 2*c.Interval {
 		c.unreachableSince = time.Time{} // sleep gap
 	}
@@ -89,10 +143,23 @@ func (c *Checker) Check(ctx context.Context) Result {
 		c.mu.Unlock()
 		return c.powerOff(ctx, res, "stopped in place", "it was stopped in place")
 	case "running":
+		c.mu.Lock()
+		c.seenUp = true
+		c.mu.Unlock()
 	default:
 		c.mu.Lock()
 		c.sawDown = true
 		c.lastActive, c.unreachableSince = time.Time{}, time.Time{}
+		switch {
+		case state == "starting":
+			c.seenUp = true
+		case state != "stopped" && state != "stopping":
+			// locked or unknown: keep watching
+		case c.seenUp:
+			c.disarm("instance " + state)
+		case now.Sub(c.armedAt) >= startGrace:
+			c.disarm("instance still " + state + " after start")
+		}
 		c.mu.Unlock()
 		return res
 	}
@@ -184,7 +251,7 @@ func (c *Checker) powerOff(ctx context.Context, res Result, reason, detail strin
 		return res
 	}
 	c.mu.Lock()
-	c.lastActive, c.unreachableSince = time.Time{}, time.Time{}
+	c.disarm("powered off")
 	c.mu.Unlock()
 	c.Log.Info("powered off", "reason", reason)
 	c.notify("steamway-activator", "Instance powered off: "+detail)

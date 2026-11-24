@@ -3,6 +3,7 @@ package watch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -75,6 +76,7 @@ type wakeEnv struct {
 	mu     sync.Mutex
 	msgs   []string
 	active int
+	starts int
 	now    time.Time
 }
 
@@ -91,6 +93,11 @@ func newWakeEnv(states ...string) *wakeEnv {
 		MarkActive: func() {
 			e.mu.Lock()
 			e.active++
+			e.mu.Unlock()
+		},
+		Started: func() {
+			e.mu.Lock()
+			e.starts++
 			e.mu.Unlock()
 		},
 		Guard:          10 * time.Second,
@@ -422,5 +429,27 @@ func TestWaker_PendingStartNotifiesStarting(t *testing.T) {
 	e.wantNote(t, "will start again")
 	if n := e.count("Starting the instance"); n != 1 {
 		t.Errorf("%d start notifications, want 1", n)
+	}
+}
+
+func (e *wakeEnv) startCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.starts
+}
+
+func TestWaker_StartedOnlyOnPowerOn(t *testing.T) {
+	for state, want := range map[string]int{"stopped": 1, "running": 0, "starting": 0, "locked": 0} {
+		e := newWakeEnv(state)
+		e.handle()
+		if got := e.startCount(); got != want {
+			t.Errorf("%s: Started called %d times, want %d", state, got, want)
+		}
+	}
+	e := newWakeEnv("stopped")
+	e.inst.powerOnErr = errors.New("no GPU")
+	e.handle()
+	if e.startCount() != 0 {
+		t.Error("Started called after a failed poweron")
 	}
 }

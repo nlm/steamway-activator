@@ -42,7 +42,8 @@ type Waker struct {
 	MAC        net.HardwareAddr
 	Instance   Instance
 	Notify     Notifier
-	MarkActive func() // Checker.MarkActive in production; may be nil
+	MarkActive func() // Checker.MarkActive in production (resets the idle clock, starts watching); may be nil
+	Started    func() // Checker.Arm in production, called after a successful poweron; may be nil
 	// Guard, PollInterval and PendingTimeout are 10 s, 10 s and 3 min in production.
 	Guard, PollInterval, PendingTimeout time.Duration
 	Now                                 func() time.Time
@@ -143,6 +144,9 @@ func (w *Waker) powerOn(ctx context.Context) Outcome {
 		w.Log.Error("power on failed", "err", err)
 		w.notify("Instance didn't start: " + errText(err))
 		return Failed
+	}
+	if w.Started != nil {
+		w.Started()
 	}
 	w.notify("Starting the instance…")
 	return Started

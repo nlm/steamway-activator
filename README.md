@@ -89,6 +89,12 @@ Something wrong? Look at the log: `tail -f ~/Library/Logs/steamway-activator.log
   of a problem on your side.
 - **Playing away from home** only works if your security group allows your current IP. Otherwise
   the instance is powered off after 10 minutes.
+- **It only watches after a Wake PC.** An instance started from the Scaleway console (or
+  anything else) is left alone: no polling, no notifications, no power-off. Watching starts when
+  you press Wake PC (whether that starts the instance or it was already running), and stops once
+  the instance is powered off or seen stopped.
+- **Restarting the program forgets the session.** If the Mac reboots or you log out while the
+  instance runs, it is no longer watched: press Wake PC again to watch it.
 - The Scaleway console always works as a fallback to start or stop the instance.
 
 ## Options
@@ -166,19 +172,23 @@ instance's state on Scaleway:
 | --- | --- |
 | stopped, stopped in place | Start it |
 | starting | Nothing, it's on its way |
-| running | Counts as activity (resets the idle clock) |
+| running | Starts watching it if not already, and resets the idle clock |
 | stopping | Waits up to 3 minutes, then starts it |
 | locked | Notification: Scaleway won't start it |
 
 Repeated packets within 10 seconds of a start are ignored (Moonlight sends several).
 
-**Automatic power-off.** Every minute the program asks Scaleway for the state and, if the
-instance is running, asks Sunshine whether a game (app) is running. It powers off (`poweroff`,
+**Automatic power-off.** Only after a Wake PC: every minute the program asks
+Scaleway for the state and, if the instance is running, asks Sunshine whether a game (app) is
+running. Until then it makes no request at all. It powers off (`poweroff`,
 which releases the GPU and stops billing) when:
 
 - no app has been running for the idle limit, counted from Sunshine's first answer after boot;
 - Sunshine hasn't answered for the unreachable limit while Scaleway says the instance runs;
 - the instance is "stopped in place" (still billed).
+
+It stops watching after powering off, or when it sees the instance stopping or stopped (or still
+stopped 3 minutes after the start).
 
 If Scaleway can't be reached, it does nothing and tries again. After the Mac slept, the time
 asleep counts as idle, but only once Sunshine confirms no game is running.
